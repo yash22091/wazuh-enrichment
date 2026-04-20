@@ -336,6 +336,9 @@ int w_analysisd_write_state() {
         "# Events dropped\n"
         "events_dropped='%lu'\n"
         "\n"
+        "# Events recovered from drop buffer (re-ingested from disk)\n"
+        "events_recovered='%lu'\n"
+        "\n"
         "# Alerts written to disk\n"
         "alerts_written='%lu'\n"
         "\n"
@@ -462,6 +465,7 @@ int w_analysisd_write_state() {
         state_cpy.events_dropped_breakdown.modules.ciscat +
         state_cpy.events_dropped_breakdown.syslog +
         state_cpy.events_dropped_breakdown.modules.logcollector.others,
+        state_cpy.events_recovered,
         state_cpy.events_written_breakdown.alerts_written,
         state_cpy.events_written_breakdown.firewall_written,
         state_cpy.events_written_breakdown.fts_written,
@@ -1429,6 +1433,12 @@ void w_inc_eps_events_dropped() {
 void w_inc_eps_events_dropped_not_eps() {
     w_mutex_lock(&state_mutex);
     analysisd_state.eps_state_breakdown.events_dropped_not_eps++;
+    w_mutex_unlock(&state_mutex);
+}
+
+void w_inc_events_recovered(uint64_t n) {
+    w_mutex_lock(&state_mutex);
+    analysisd_state.events_recovered += n;
     w_mutex_unlock(&state_mutex);
 }
 

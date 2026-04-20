@@ -266,9 +266,14 @@ static void *w_rdb_reingest_thread(__attribute__((unused)) void *arg)
             int result = SendMSG(logr.m_queue, msg, srcmsg, mq_type);
 
             if (result < 0) {
-                /* analysisd still not accepting — reconnect once and retry */
-                logr.m_queue = StartMQ(DEFAULTQUEUE, WRITE, INFINITE_OPENQ_ATTEMPTS);
-                result = SendMSG(logr.m_queue, msg, srcmsg, mq_type);
+                /* analysisd still not accepting — try once on a local fd.
+             * Never write to shared logr.m_queue from here: that would race
+             * with dispatcher threads.                                      */
+                int tmp_q = StartMQ(DEFAULTQUEUE, WRITE, 1);
+                if (tmp_q >= 0) {
+                    result = SendMSG(tmp_q, msg, srcmsg, mq_type);
+                    close(tmp_q);
+                }
             }
 
             os_free(buf);
@@ -362,8 +367,12 @@ void remoted_drop_buffer_persist(const char *msg, const char *srcmsg, char mq_ty
     if (!e) return;
 
     e->mq_type = mq_type;
-    os_strdup(msg,    e->msg);
-    os_strdup(srcmsg, e->srcmsg);
+    e->msg    = strdup(msg);
+    e->srcmsg = strdup(srcmsg);
+    if (!e->msg || !e->srcmsg) {
+        free_entry(e);
+        return;
+    }
 
     if (queue_push_ex(rdb_write_queue, e) == -1) {
         /* In-memory queue also full — drop silently (counter already incremented) */

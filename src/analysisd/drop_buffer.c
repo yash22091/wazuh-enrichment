@@ -37,6 +37,7 @@
 #include "shared.h"
 #include "drop_buffer.h"
 #include "analysisd.h"
+#include "state.h"
 #include "limits.h"
 
 #include <dirent.h>
@@ -342,56 +343,56 @@ static void *w_drop_buffer_reingest_thread(__attribute__((unused)) void *arg)
 
             if (type == SYSCHECK_MQ) {
                 if (!queue_full_ex(decode_queue_syscheck_input)) {
-                    os_strdup(buf, copy);
+                    copy = strdup(buf); if (!copy) { continue; }
                     result = queue_push_ex(decode_queue_syscheck_input, copy);
                     if (result == -1) { free(copy); }
                 }
             } else if (type == ROOTCHECK_MQ) {
                 if (!queue_full_ex(decode_queue_rootcheck_input)) {
-                    os_strdup(buf, copy);
+                    copy = strdup(buf); if (!copy) { continue; }
                     result = queue_push_ex(decode_queue_rootcheck_input, copy);
                     if (result == -1) { free(copy); }
                 }
             } else if (type == SCA_MQ) {
                 if (!queue_full_ex(decode_queue_sca_input)) {
-                    os_strdup(buf, copy);
+                    copy = strdup(buf); if (!copy) { continue; }
                     result = queue_push_ex(decode_queue_sca_input, copy);
                     if (result == -1) { free(copy); }
                 }
             } else if (type == SYSCOLLECTOR_MQ) {
                 if (!queue_full_ex(decode_queue_syscollector_input)) {
-                    os_strdup(buf, copy);
+                    copy = strdup(buf); if (!copy) { continue; }
                     result = queue_push_ex(decode_queue_syscollector_input, copy);
                     if (result == -1) { free(copy); }
                 }
             } else if (type == HOSTINFO_MQ) {
                 if (!queue_full_ex(decode_queue_hostinfo_input)) {
-                    os_strdup(buf, copy);
+                    copy = strdup(buf); if (!copy) { continue; }
                     result = queue_push_ex(decode_queue_hostinfo_input, copy);
                     if (result == -1) { free(copy); }
                 }
             } else if (type == WIN_EVT_MQ) {
                 if (!queue_full_ex(decode_queue_winevt_input)) {
-                    os_strdup(buf, copy);
+                    copy = strdup(buf); if (!copy) { continue; }
                     result = queue_push_ex(decode_queue_winevt_input, copy);
                     if (result == -1) { free(copy); }
                 }
             } else if (type == DBSYNC_MQ) {
                 if (!queue_full_ex(dispatch_dbsync_input)) {
-                    os_strdup(buf, copy);
+                    copy = strdup(buf); if (!copy) { continue; }
                     result = queue_push_ex(dispatch_dbsync_input, copy);
                     if (result == -1) { free(copy); }
                 }
             } else if (type == UPGRADE_MQ) {
                 if (!queue_full_ex(upgrade_module_input)) {
-                    os_strdup(buf, copy);
+                    copy = strdup(buf); if (!copy) { continue; }
                     result = queue_push_ex(upgrade_module_input, copy);
                     if (result == -1) { free(copy); }
                 }
             } else {
                 /* LOCALFILE_MQ, SYSLOG_MQ, CISCAT_MQ, and other generics.   */
                 if (!queue_full_ex(decode_queue_event_input)) {
-                    os_strdup(buf, copy);
+                    copy = strdup(buf); if (!copy) { continue; }
                     result = queue_push_ex(decode_queue_event_input, copy);
                     if (result == -1) { free(copy); }
                 }
@@ -418,7 +419,8 @@ static void *w_drop_buffer_reingest_thread(__attribute__((unused)) void *arg)
         free(names);
 
         if (processed > 0) {
-            mdebug1("drop_buffer: re-ingested %d event(s) from disk.", processed);
+            minfo("drop_buffer: re-ingested %d event(s) from disk.", processed);
+            w_inc_events_recovered((uint64_t)processed);
         }
     }
 

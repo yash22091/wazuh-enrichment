@@ -160,13 +160,18 @@ void agent_offline_check_reconnect(const keyentry *key)
     if (SendMSG(logr.m_queue, alert_msg, srcmsg, SECURE_MQ) < 0) {
         merror(QUEUE_ERROR, DEFAULTQUEUE, strerror(errno));
 
-        /* Attempt to reconnect the queue socket and retry once. */
-        logr.m_queue = StartMQ(DEFAULTQUEUE, WRITE, INFINITE_OPENQ_ATTEMPTS);
-        minfo("Successfully reconnected to '%s'", DEFAULTQUEUE);
-
-        if (SendMSG(logr.m_queue, alert_msg, srcmsg, SECURE_MQ) < 0) {
-            merror("agent_offline_tracker: failed to forward offline-gap alert "
-                   "for agent '%s' to analysisd.", key->id);
+        /* Attempt to reconnect once on a local fd — never write to shared
+         * logr.m_queue to avoid racing with dispatcher threads.           */
+        int tmp_q = StartMQ(DEFAULTQUEUE, WRITE, 1);
+        if (tmp_q >= 0) {
+            if (SendMSG(tmp_q, alert_msg, srcmsg, SECURE_MQ) < 0) {
+                merror("agent_offline_tracker: failed to forward offline-gap alert "
+                       "for agent '%s' to analysisd.", key->id);
+            }
+            close(tmp_q);
+        } else {
+            merror("agent_offline_tracker: analysisd unavailable, offline-gap alert "
+                   "for agent '%s' not forwarded.", key->id);
         }
     }
 

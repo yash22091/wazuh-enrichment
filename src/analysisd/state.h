@@ -119,6 +119,7 @@ typedef struct _analysisd_state_t {
     events_t events_dropped_breakdown;
     written_t events_written_breakdown;
     eps_state_t eps_state_breakdown;
+    uint64_t events_recovered;
 } analysisd_state_t;
 
 typedef struct _analysisd_agent_state_t {
@@ -486,6 +487,11 @@ void w_inc_eps_events_dropped();
  * @brief Increment events dropped by causes unrelated to eps
  */
 void w_inc_eps_events_dropped_not_eps();
+
+/**
+ * @brief Increment events recovered from drop buffer (re-ingested from disk)
+ */
+void w_inc_events_recovered(uint64_t n);
 
 /**
  * @brief Increment seconds over eps limit
