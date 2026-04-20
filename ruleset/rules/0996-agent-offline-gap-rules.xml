@@ -1,0 +1,14 @@
+<group name="wazuh,remoted,agent_offline_gap,">
+
+  <rule id="99950" level="7">
+    <program_name>wazuh-remoted</program_name>
+    <match>Agent offline gap detected</match>
+    <description>Agent $(agent.name) reconnected after an offline window. Log events during the offline period may be incomplete.</description>
+    <options>no_full_log</options>
+    <group>agent_offline,visibility,</group>
+    <mitre>
+      <id>T1562.001</id>
+    </mitre>
+  </rule>
+
+</group>
