@@ -1,195 +1,204 @@
-# Wazuh
+# wazuh-enrichment
 
-[![Slack](https://img.shields.io/badge/slack-join-blue.svg)](https://wazuh.com/community/join-us-on-slack/)
-[![Email](https://img.shields.io/badge/email-join-blue.svg)](https://groups.google.com/forum/#!forum/wazuh)
-[![Documentation](https://img.shields.io/badge/docs-view-green.svg)](https://documentation.wazuh.com)
-[![Documentation](https://img.shields.io/badge/web-view-green.svg)](https://wazuh.com)
-[![Coverity](https://scan.coverity.com/projects/10992/badge.svg)](https://scan.coverity.com/projects/wazuh-wazuh)
-[![Twitter](https://img.shields.io/twitter/follow/wazuh?style=social)](https://twitter.com/wazuh)
-[![YouTube](https://img.shields.io/youtube/views/peTSzcAueEc?style=social)](https://www.youtube.com/watch?v=peTSzcAueEc)
+Custom Wazuh Manager 4.14.4 with three production-ready enrichment modules that close critical observability and reliability gaps in the stock build.
 
+> Build: `wazuh-manager_4.14.4-0_amd64_196d860.deb`  
+> Base: [Wazuh](https://github.com/wazuh/wazuh) 4.14.4 (GPLv2)
 
-Wazuh is a free and open source platform used for threat prevention, detection, and response. It is capable of protecting workloads across on-premises, virtualized, containerized, and cloud-based environments.
+---
 
-Wazuh solution consists of an endpoint security agent, deployed to the monitored systems, and a management server, which collects and analyzes data gathered by the agents. Besides, Wazuh has been fully integrated with the Elastic Stack, providing a search engine and data visualization tool that allows users to navigate through their security alerts.
+## What this adds
 
-## Wazuh capabilities
+| Module | Problem solved | Where |
+|---|---|---|
+| `analysisd drop_buffer` | Events silently discarded when analysisd sub-queues are full — gone permanently | `src/analysisd/drop_buffer.c` |
+| `remoted_drop_buffer` | Agent events lost when analysisd is down or restarting | `src/remoted/remoted_drop_buffer.c` |
+| `agent_offline_tracker` | No visibility into how long an agent was offline or how many events may be missing | `src/remoted/agent_offline_tracker.c` |
 
-A brief presentation of some of the more common use cases of the Wazuh solution.
+---
 
-**Intrusion detection**
+## 1. analysisd drop_buffer
 
-Wazuh agents scan the monitored systems looking for malware, rootkits and suspicious anomalies. They can detect hidden files, cloaked processes or unregistered network listeners, as well as inconsistencies in system call responses.
+When `analysisd`'s in-memory sub-queues fill up, the event dispatcher would silently drop the event. This module intercepts that drop point and writes the event to disk instead.
 
-In addition to agent capabilities, the server component uses a signature-based approach to intrusion detection, using its regular expression engine to analyze collected log data and look for indicators of compromise.
+**How it works:**
 
-**Log data analysis**
+```
+ad_input_main  →  queue full  →  drop_buffer_persist()       [hot path, O(1) malloc only]
+                                       ↓
+                              w_drop_buffer_writer_thread     [background, writes .msg files]
+                                       ↓
+                              w_drop_buffer_reingest_thread   [background, re-routes back into sub-queue]
+```
 
-Wazuh agents read operating system and application logs, and securely forward them to a central manager for rule-based analysis and storage. When no agent is deployed, the server can also receive data via syslog from network devices or applications.
+- Zero latency on the dispatcher thread — no disk I/O in the hot path
+- Bounded to 256 MB on disk; oldest files evicted automatically
+- Back-pressure aware: reingest pauses when queues are still ≥ 70% full
+- Crash-safe: files survive restarts; reingest resumes on next start
+- OOM-safe: `malloc`/`strdup` failures skip the event, never kill the process
 
-The Wazuh rules help make you aware of application or system errors, misconfigurations, attempted and/or successful malicious activities, policy violations and a variety of other security and operational issues.
+**Tunables** (`src/analysisd/drop_buffer.c`):
 
-**File integrity monitoring**
+| Constant | Default |
+|---|---|
+| `DROP_BUFFER_MAX_MB` | `256` |
+| `DROP_BUFFER_BATCH` | `50` events/sec |
+| `DROP_BUFFER_LOAD_THRESH` | `0.70` |
+| `DROP_BUFFER_SLEEP_S` | `1` |
 
-Wazuh monitors the file system, identifying changes in content, permissions, ownership, and attributes of files that you need to keep an eye on. In addition, it natively identifies users and applications used to create or modify files.
+**Visibility:**
+```bash
+sudo grep "events_dropped\|events_recovered" /var/ossec/var/run/wazuh-analysisd.state
+sudo ls /var/ossec/queue/drop-buffer/ | wc -l
+```
 
-File integrity monitoring capabilities can be used in combination with threat intelligence to identify threats or compromised hosts. In addition, several regulatory compliance standards, such as PCI DSS, require it.
+---
 
-**Vulnerability detection**
+## 2. remoted_drop_buffer
 
-Wazuh agents pull software inventory data and send this information to the server, where it is correlated with continuously updated CVE (Common Vulnerabilities and Exposure) databases, in order to identify well-known vulnerable software.
+When `wazuh-remoted` forwards an agent event to `analysisd` via `SendMSG()` and the call fails (analysisd down, restarting, socket buffer full), the event was permanently lost. This module persists it to disk and retries with exponential backoff.
 
-Automated vulnerability assessment helps you find the weak spots in your critical assets and take corrective action before attackers exploit them to sabotage your business or steal confidential data.
+**How it works:**
 
-**Configuration assessment**
+```
+secure.c  →  SendMSG() fails  →  remoted_drop_buffer_persist()   [hot path, O(1)]
+                                          ↓
+                                 w_rdb_writer_thread              [writes .evt files]
+                                          ↓
+                                 w_rdb_reingest_thread            [retries with backoff]
+```
 
-Wazuh monitors system and application configuration settings to ensure they are compliant with your security policies, standards and/or hardening guides. Agents perform periodic scans to detect applications that are known to be vulnerable, unpatched, or insecurely configured.
+- Exponential backoff: 1 s → 2 s → 4 s … up to 30 s max
+- No shared-fd races: reingest thread uses a local `tmp_q`, never touches `logr.m_queue`
+- `.evt` file format: 3-line plain text (`mq_type` / `srcmsg` / `message`) — human-readable
 
-Additionally, configuration checks can be customized, tailoring them to properly align with your organization. Alerts include recommendations for better configuration, references and mapping with regulatory compliance.
+**Tunables** (`src/remoted/remoted_drop_buffer.h`):
 
-**Incident response**
+| Constant | Default |
+|---|---|
+| `RDB_MAX_MB` | `64` |
+| `RDB_BATCH` | `30` events/cycle |
+| `RDB_BACKOFF_MAX_S` | `30` |
 
-Wazuh provides out-of-the-box active responses to perform various countermeasures to address active threats, such as blocking access to a system from the threat source when certain criteria are met.
+**Visibility:**
+```bash
+sudo ls /var/ossec/queue/remoted-drop-buffer/ | wc -l
+sudo cat /var/ossec/queue/remoted-drop-buffer/<file>   # inspect a buffered event
+```
 
-In addition, Wazuh can be used to remotely run commands or system queries, identifying indicators of compromise (IOCs) and helping perform other live forensics or incident response tasks.
+---
 
-**Regulatory compliance**
+## 3. agent_offline_tracker
 
-Wazuh provides some of the necessary security controls to become compliant with industry standards and regulations. These features, combined with its scalability and multi-platform support help organizations meet technical compliance requirements.
+When an agent reconnects after being offline, this module computes the offline gap, logs a warning, and fires an alert to the dashboard. Operators can now see exactly when an agent was offline and for how long.
 
-Wazuh is widely used by payment processing companies and financial institutions to meet PCI DSS (Payment Card Industry Data Security Standard) requirements. Its web user interface provides reports and dashboards that can help with this and other regulations (e.g. GPG13 or GDPR).
+**How it works:**
 
-**Cloud security**
+- On `HC_SHUTDOWN`: writes epoch timestamp to `queue/agent-offline/<agent_id>`
+- On `HC_STARTUP`: reads the file, computes `gap = now − disconnect_ts`
+- If `gap ≥ 60 s`: logs `WARNING` to `ossec.log` + sends internal alert → rule 99950
 
-Wazuh helps monitoring cloud infrastructure at an API level, using integration modules that are able to pull security data from well known cloud providers, such as Amazon AWS, Azure or Google Cloud. In addition, Wazuh provides rules to assess the configuration of your cloud environment, easily spotting weaknesses.
+**Fallback:** If the agent dropped without sending HC_SHUTDOWN (TCP reset, power loss), falls back to `key->rcvd` (last packet time) as a lower-bound estimate.
 
-In addition, Wazuh light-weight and multi-platform agents are commonly used to monitor cloud environments at the instance level.
+**Sample log (`ossec.log`):**
+```
+WARNING: Agent 001 (testing) @ 192.168.1.10 reconnected after 155 second(s) offline
+(disconnected: 2026-04-20T05:45:13Z, reconnected: 2026-04-20T05:47:48Z).
+Log events during this offline window may be incomplete.
+```
 
-**Containers security**
+**Alert (rule 99950, level 7):**
+```bash
+sudo grep "99950\|offline gap" /var/ossec/logs/alerts/alerts.log | tail -5
+```
 
-Wazuh provides security visibility into your Docker hosts and containers, monitoring their behavior and detecting threats, vulnerabilities and anomalies. The Wazuh agent has native integration with the Docker engine allowing users to monitor images, volumes, network settings, and running containers.
+**Tunable** (`src/remoted/agent_offline_tracker.h`):
 
-Wazuh continuously collects and analyzes detailed runtime information. For example, alerting for containers running in privileged mode, vulnerable applications, a shell running in a container, changes to persistent volumes or images, and other possible threats.
+| Constant | Default |
+|---|---|
+| `AGENT_OFFLINE_MIN_GAP_SECS` | `60` |
 
-## WUI
+---
 
-The Wazuh WUI provides a powerful user interface for data visualization and analysis. This interface can also be used to manage Wazuh configuration and to monitor its status.
+## Modified core files
 
-**Modules overview**
+| File | Change |
+|---|---|
+| `src/remoted/secure.c` | Single-attempt reconnect; falls through to `remoted_drop_buffer_persist()` on failure |
+| `src/shared/mq_op.c` | `OS_SOCKBUSY` returns `-1` (was `0`) so callers correctly detect failure |
+| `src/remoted/manager.c` | Calls `agent_offline_record_disconnect()` / `agent_offline_check_reconnect()` |
+| `src/remoted/main.c` | Calls `agent_offline_tracker_init()` and `remoted_drop_buffer_init()` at startup |
+| `src/analysisd/analysisd.c` | Calls `drop_buffer_init()` + `drop_buffer_persist()` at all 9 queue-full drop points |
+| `src/analysisd/state.h` / `state.c` | Added `events_recovered` counter to state struct and `.state` file output |
+| `src/init/inst-functions.sh` | Creates 3 queue dirs (`0770 wazuh:wazuh`) on install |
+| `ruleset/rules/0996-agent-offline-gap-rules.xml` | Rule 99950 — agent offline gap alert |
 
-![Modules overview](https://github.com/wazuh/wazuh-dashboard-plugins/raw/master/screenshots/app.png)
+Full detail: [docs/custom-features.md](docs/custom-features.md)
 
-**Security events**
+---
 
-![Overview](https://github.com/wazuh/wazuh-dashboard-plugins/blob/master/screenshots/app2.png)
+## Security fixes
 
-**Integrity monitoring**
+All 7 issues found during development are patched in this build:
 
-![Overview](https://github.com/wazuh/wazuh-dashboard-plugins/blob/master/screenshots/app3.png)
-
-**Vulnerability detection**
-
-![Overview](https://github.com/wazuh/wazuh-dashboard-plugins/blob/master/screenshots/app4.png)
-
-**Regulatory compliance**
-
-![Overview](https://github.com/wazuh/wazuh-dashboard-plugins/blob/master/screenshots/app5.png)
-
-**Agents overview**
-
-![Overview](https://github.com/wazuh/wazuh-dashboard-plugins/blob/master/screenshots/app6.png)
-
-**Agent summary**
-
-![Overview](https://github.com/wazuh/wazuh-dashboard-plugins/blob/master/screenshots/app7.png)
-
-## Orchestration
-
-Here you can find all the automation tools maintained by the Wazuh team.
-
-* [Wazuh AWS CloudFormation](https://github.com/wazuh/wazuh-cloudformation)
-
-* [Docker containers](https://github.com/wazuh/wazuh-docker)
-
-* [Wazuh Ansible](https://github.com/wazuh/wazuh-ansible)
-
-* [Wazuh Chef](https://github.com/wazuh/wazuh-chef)
-
-* [Wazuh Puppet](https://github.com/wazuh/wazuh-puppet)
-
-* [Wazuh Kubernetes](https://github.com/wazuh/wazuh-kubernetes)
-
-* [Wazuh Bosh](https://github.com/wazuh/wazuh-bosh)
-
-* [Wazuh Salt](https://github.com/wazuh/wazuh-salt)
-
-## Branches
-
-* `main` branch contains the latest code, be aware of possible bugs on this branch.
-
-## Software and libraries used
-
-|Software|Version|Author|License|
+| # | File | Issue | Fix |
 |---|---|---|---|
-|[bpftool](https://github.com/libbpf/bpftool)|7.5.0|libbpf|GNU Public License version 2|
-|[bzip2](https://github.com/libarchive/bzip2)|1.0.8|Julian Seward|BSD License|
-|[cJSON](https://github.com/DaveGamble/cJSON)|1.7.18|Dave Gamble|MIT License|
-|[cpp-httplib](https://github.com/yhirose/cpp-httplib)|0.25.0|yhirose|MIT License|
-|[cPython](https://github.com/python/cpython)|3.10.19|Guido van Rossum|Python Software Foundation License version 2|
-|[cURL](https://github.com/curl/curl)|8.12.1|Daniel Stenberg|MIT License|
-|[dbus](https://gitlab.freedesktop.org/dbus/dbus)|1.14.10|freedesktop.org|GNU Public License version 2|
-|[Flatbuffers](https://github.com/google/flatbuffers/)|23.5.26|Google Inc.|Apache 2.0 License|
-|[Google Benchmark](https://github.com/google/benchmark)|1.6.1|Google Inc.|Apache 2.0 License||
-|[GoogleTest](https://github.com/google/googletest)|1.11.0|Google Inc.|3-Clause "New" BSD License|
-|[jemalloc](https://github.com/jemalloc/jemalloc)|5.2.1|Jason Evans|2-Clause "Simplified" BSD License|
-|[libarchive](https://github.com/libarchive/libarchive)|3.8.1|Tim Kientzle|3-Clause "New" BSD License|
-|[libbpf](https://github.com/libbpf/libbpf)|1.5.0|libbpf|GNU Lesser General Public License version 2.1|
-|[libdb](https://github.com/yasuhirokimura/db18)|18.1.40|Oracle Corporation|Affero GPL v3|
-|[libffi](https://github.com/libffi/libffi)|3.2.1|Anthony Green|MIT License|
-|[libpcre2](https://github.com/PCRE2Project/pcre2)|10.42.0|Philip Hazel|BSD License|
-|[libplist](https://github.com/libimobiledevice/libplist)|2.2.0|Aaron Burghardt et al.|GNU Lesser General Public License version 2.1|
-|[libYAML](https://github.com/yaml/libyaml)|0.1.7|Kirill Simonov|MIT License|
-|[liblzma](https://github.com/tukaani-project/xz)|5.4.2|Lasse Collin, Jia Tan et al.|GNU Public License version 3|
-|[Linux Audit userspace](https://github.com/linux-audit/audit-userspace)|2.8.4|Rik Faith|GNU Lesser General Public License|
-|[Lua](https://github.com/lua/lua)|5.4.8|PUC-Rio|MIT License|
-|[msgpack](https://github.com/msgpack/msgpack-c)|3.1.1|Sadayuki Furuhashi|Boost Software License version 1.0|
-|[nlohmann](https://github.com/nlohmann/json)|3.11.2|Niels Lohmann|MIT License|
-|[OpenSSL](https://github.com/openssl/openssl)|3.5.1|OpenSSL Software Foundation|Apache 2.0 License|
-|[pacman](https://gitlab.archlinux.org/pacman/pacman)|5.2.2|Judd Vinet|GNU Public License version 2|
-|[popt](https://github.com/rpm-software-management/popt)|1.16|Jeff Johnson & Erik Troan|MIT License|
-|[procps](https://gitlab.com/procps-ng/procps)|2.8.3|Brian Edmonds et al.|GNU Lesser General Public License|
-|[RocksDB](https://github.com/facebook/rocksdb/)|8.3.2|Facebook Inc.|Apache 2.0 License|
-|[rpm](https://github.com/rpm-software-management/rpm)|4.20.1|Marc Ewing & Erik Troan|GNU Public License version 2|
-|[simdjson](https://github.com/simdjson/simdjson)|3.13.0|Daniel Lemire|Apache License 2.0|
-|[sqlite](https://github.com/sqlite/sqlite)|3.50.4|D. Richard Hipp|Public Domain (no restrictions)|
-|[zlib](https://github.com/madler/zlib)|1.3.1|Jean-loup Gailly & Mark Adler|zlib/libpng License|
+| 1 | `drop_buffer.c` (×9) | `os_strdup()` calls `merror_exit()` on OOM — kills analysisd | `strdup()` + NULL check + `continue` |
+| 2 | `remoted_drop_buffer.c` | Same OOM-kill risk in `persist()` | `strdup()` + NULL check + `free_entry(); return` |
+| 3 | `remoted_drop_buffer.c` | `INFINITE_OPENQ_ATTEMPTS` blocks reingest thread forever | `StartMQ(..., 1)` on local `tmp_q` |
+| 4 | `remoted_drop_buffer.c` | Reingest thread writes to `logr.m_queue` — data race | Local `tmp_q` only; shared global never touched |
+| 5 | `agent_offline_tracker.c` | Same blocking + race | Local `tmp_q` with single attempt |
+| 6 | `secure.c` | Infinite reconnect loop blocks dispatcher thread | Single attempt; `-1` on failure |
+| 7 | `mq_op.c` | `OS_SOCKBUSY` returned `0` — silent failure | Returns `-1` |
 
-* [PyPi packages](framework/requirements.txt)
+---
 
-## Documentation
+## Quick start
 
-* [Full documentation](http://documentation.wazuh.com)
-* [Wazuh installation guide](https://documentation.wazuh.com/current/installation-guide/index.html)
+```bash
+# Install
+sudo dpkg -i wazuh-manager_4.14.4-0_amd64_196d860.deb
 
-## Get involved
+# Verify all 3 modules initialized
+sudo grep -E "drop_buffer|remoted_drop_buffer|agent_offline_tracker" \
+  /var/ossec/logs/ossec.log | grep -i "initializ" | tail -6
 
-Become part of the [Wazuh's community](https://wazuh.com/community/) to learn from other users, participate in discussions, talk to our developers and contribute to the project.
+# Check recovery counter
+sudo grep "events_dropped\|events_recovered" /var/ossec/var/run/wazuh-analysisd.state
+```
 
-If you want to contribute to our project please don’t hesitate to make pull-requests, submit issues or send commits, we will review all your questions.
+---
 
-You can also join our [Slack community channel](https://wazuh.com/community/join-us-on-slack/) and [mailing list](https://groups.google.com/d/forum/wazuh) by sending an email to [wazuh+subscribe@googlegroups.com](mailto:wazuh+subscribe@googlegroups.com), to ask questions and participate in discussions.
+## Repository layout (custom files)
 
-Stay up to date on news, releases, engineering articles and more.
+```
+src/
+├── analysisd/
+│   ├── drop_buffer.c          # analysisd event persistence
+│   ├── drop_buffer.h
+│   ├── state.c                # + events_recovered counter
+│   └── state.h                # + events_recovered field
+├── remoted/
+│   ├── remoted_drop_buffer.c  # remoted → analysisd persistence
+│   ├── remoted_drop_buffer.h
+│   ├── agent_offline_tracker.c
+│   ├── agent_offline_tracker.h
+│   ├── secure.c               # modified
+│   └── manager.c              # modified
+└── shared/
+    └── mq_op.c                # modified
 
-* [Wazuh website](http://wazuh.com)
-* [Linkedin](https://www.linkedin.com/company/wazuh)
-* [YouTube](https://www.youtube.com/c/wazuhsecurity)
-* [Twitter](https://twitter.com/wazuh)
-* [Wazuh blog](https://wazuh.com/blog/)
-* [Slack announcements channel](https://wazuh.com/community/join-us-on-slack/)
+ruleset/rules/
+└── 0996-agent-offline-gap-rules.xml
 
-## Authors
+docs/
+└── custom-features.md         # full documentation
+```
 
-Wazuh Copyright (C) 2015-2023 Wazuh Inc. (License GPLv2)
+---
 
+## License
+
+Wazuh Copyright (C) 2015-2024 Wazuh Inc. — GPLv2  
+Custom modules in this repository are also GPLv2.  
 Based on the OSSEC project started by Daniel Cid.
