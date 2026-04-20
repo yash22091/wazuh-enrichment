@@ -917,16 +917,16 @@ STATIC void HandleSecureMessage(const message_t *message, w_indexed_queue_t * co
     if (SendMSG(logr.m_queue, tmp_msg, srcmsg, SECURE_MQ) < 0) {
         merror(QUEUE_ERROR, DEFAULTQUEUE, strerror(errno));
 
-        // Try to reconnect infinitely
-        logr.m_queue = StartMQ(DEFAULTQUEUE, WRITE, INFINITE_OPENQ_ATTEMPTS);
+        /* Try to reconnect once.  If analysisd is down or still busy,
+         * persist to the drop buffer rather than blocking this thread.  */
+        int new_q = StartMQ(DEFAULTQUEUE, WRITE, 1);
+        if (new_q >= 0) {
+            logr.m_queue = new_q;
+            minfo("Successfully reconnected to '%s'", DEFAULTQUEUE);
+        }
 
-        minfo("Successfully reconnected to '%s'", DEFAULTQUEUE);
-
-        if (SendMSG(logr.m_queue, tmp_msg, srcmsg, SECURE_MQ) < 0) {
-            // Something went wrong sending a message after an immediate reconnection...
+        if (new_q < 0 || SendMSG(logr.m_queue, tmp_msg, srcmsg, SECURE_MQ) < 0) {
             merror(QUEUE_ERROR, DEFAULTQUEUE, strerror(errno));
-            /* Track this drop for observability.  The remoted drop buffer will
-             * persist and retry the event asynchronously.                      */
             rem_inc_analysisd_queue_drop();
             remoted_drop_buffer_persist(tmp_msg, srcmsg, SECURE_MQ);
         } else {
