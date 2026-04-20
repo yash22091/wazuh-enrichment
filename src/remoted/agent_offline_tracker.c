@@ -20,12 +20,15 @@
 void agent_offline_tracker_init(void)
 {
     if (IsDir(AGENT_OFFLINE_DIR) != 0) {
-        if (mkdir(AGENT_OFFLINE_DIR, 0750) != 0) {
+        if (mkdir(AGENT_OFFLINE_DIR, 0770) != 0) {
             merror("agent_offline_tracker: cannot create '%s': %s",
                    AGENT_OFFLINE_DIR, strerror(errno));
             return;
         }
         minfo("agent_offline_tracker: created '%s'.", AGENT_OFFLINE_DIR);
+    } else {
+        /* Ensure writable by wazuh group if dir was created with wrong permissions. */
+        chmod(AGENT_OFFLINE_DIR, 0770);
     }
 }
 

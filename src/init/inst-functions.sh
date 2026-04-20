@@ -1318,6 +1318,9 @@ InstallServer()
 
     ${INSTALL} -d -m 0770 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${INSTALLDIR}/queue/rids
     ${INSTALL} -d -m 0770 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${INSTALLDIR}/queue/router
+    ${INSTALL} -d -m 0770 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${INSTALLDIR}/queue/agent-offline
+    ${INSTALL} -d -m 0770 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${INSTALLDIR}/queue/remoted-drop-buffer
+    ${INSTALL} -d -m 0770 -o ${WAZUH_USER} -g ${WAZUH_GROUP} ${INSTALLDIR}/queue/drop-buffer
 
     if [ ! -f ${INSTALLDIR}/queue/agents-timestamp ]; then
         ${INSTALL} -m 0600 -o root -g ${WAZUH_GROUP} /dev/null ${INSTALLDIR}/queue/agents-timestamp

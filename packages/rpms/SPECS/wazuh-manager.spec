@@ -834,6 +834,9 @@ rm -fr %{buildroot}
 %dir %attr(660, root, wazuh) %{_localstatedir}/queue/vd
 %dir %attr(660, root, wazuh) %{_localstatedir}/queue/indexer
 %dir %attr(770, wazuh, wazuh) %{_localstatedir}/queue/router
+%dir %attr(770, wazuh, wazuh) %{_localstatedir}/queue/agent-offline
+%dir %attr(770, wazuh, wazuh) %{_localstatedir}/queue/remoted-drop-buffer
+%dir %attr(770, wazuh, wazuh) %{_localstatedir}/queue/drop-buffer
 %dir %attr(750, wazuh, wazuh) %{_localstatedir}/queue/logcollector
 %dir %attr(750, wazuh, wazuh) %{_localstatedir}/queue/keystore
 %dir %attr(750, root, wazuh) %{_localstatedir}/ruleset
