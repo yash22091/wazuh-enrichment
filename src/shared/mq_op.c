@@ -165,6 +165,7 @@ STATIC int SendMSGAction(int queue, const char *message, const char *locmsg, cha
             reported = 1;
             mwarn("Socket busy, discarding message.");
         }
+        return (-1);
     }
 
     return (0);
