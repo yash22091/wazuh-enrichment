@@ -923,6 +923,11 @@ STATIC void HandleSecureMessage(const message_t *message, w_indexed_queue_t * co
         if (new_q >= 0) {
             logr.m_queue = new_q;
             minfo("Successfully reconnected to '%s'", DEFAULTQUEUE);
+        } else {
+            /* Mark queue invalid so next SendMSG returns -1 immediately
+             * without attempting close() on a stale fd, which could race
+             * with fd reuse in other threads.                             */
+            logr.m_queue = -1;
         }
 
         if (new_q < 0 || SendMSG(logr.m_queue, tmp_msg, srcmsg, SECURE_MQ) < 0) {
